@@ -30,6 +30,7 @@ import (
 
 const (
 	uploadFileFormField = "uploadFile"
+	lzcUserHomePath     = "/lzcapp/run/mnt/home/"
 )
 
 var (
@@ -115,6 +116,7 @@ func openLzcFile(w http.ResponseWriter, r *http.Request) error {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return nil
 	}
+	filePath = lzcUserHomePath + filePath
 
 	data, err := os.ReadFile(filePath)
 
