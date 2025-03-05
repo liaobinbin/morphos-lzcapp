@@ -108,6 +108,77 @@ type ConvertedFile struct {
 	FileType string
 }
 
+func openLzcFile(w http.ResponseWriter, r *http.Request) error {
+	filePath := r.URL.Query().Get("filePath")
+
+	if filePath == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return nil
+	}
+
+	data, err := os.ReadFile(filePath)
+
+	if err != nil {
+		log.Printf("get file error: %v", err)
+
+		http.Redirect(w, r, "/", http.StatusFound)
+
+		return nil
+	}
+
+	tmpls := []string{
+		"templates/base.tmpl",
+		"templates/partials/htmx.tmpl",
+		"templates/partials/style.tmpl",
+		"templates/partials/nav.tmpl",
+		"templates/partials/form-lzc.tmpl",
+		"templates/partials/modal.tmpl",
+		"templates/partials/js.tmpl",
+	}
+
+	detectedFileType := mimetype.Detect(data)
+
+	fileType, subType, err := files.TypeAndSupType(detectedFileType.String())
+	if err != nil {
+		log.Printf("error occurred getting type and subtype from mimetype: %v", err)
+		return WithHTTPStatus(err, http.StatusBadRequest)
+	}
+
+	fileFactory, err := files.BuildFactory(fileType, "")
+	if err != nil {
+		log.Printf("error occurred while getting a file factory: %v", err)
+		return WithHTTPStatus(err, http.StatusBadRequest)
+	}
+
+	f, err := fileFactory.NewFile(subType)
+	if err != nil {
+		log.Printf("error occurred getting the file object: %v", err)
+		return WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	tmpl, err := template.ParseFS(templatesHTML, tmpls...)
+	if err != nil {
+		log.Printf("error occurred parsing template files: %v", err)
+		return WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	fileData := map[string]string{
+		"filename": filepath.Base(filePath),
+		"filepath": filePath,
+	}
+	mergeData := map[string]interface{}{
+		"fileData":   fileData,
+		"targetList": f.SupportedFormats(),
+	}
+
+	if err = tmpl.ExecuteTemplate(w, "base", mergeData); err != nil {
+		log.Printf("error occurred executing template files: %v", err)
+		return WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	return nil
+}
+
 func index(w http.ResponseWriter, _ *http.Request) error {
 	tmpls := []string{
 		"templates/base.tmpl",
@@ -128,6 +199,47 @@ func index(w http.ResponseWriter, _ *http.Request) error {
 	err = tmpl.ExecuteTemplate(w, "base", nil)
 	if err != nil {
 		log.Printf("error ocurred executing template: %v", err)
+		return WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	return nil
+}
+
+func handleUploadLzcFile(w http.ResponseWriter, r *http.Request) error {
+
+	filePath := r.FormValue("filePath")
+	fileName := r.FormValue("fileName")
+	targetFormat := r.FormValue("targetFormat")
+
+	byteData, err := os.ReadFile(filePath)
+
+	if err != nil {
+		return nil
+	}
+
+	convertedFileName, convertedFileType, _, err := convertFileLzc(byteData, targetFormat, fileName)
+	if err != nil {
+		return err
+	}
+
+	tmpls := []string{
+		"templates/partials/card_file.tmpl",
+		"templates/partials/modal.tmpl",
+	}
+
+	tmpl, err := template.ParseFS(templatesHTML, tmpls...)
+	if err != nil {
+		log.Printf("error occurred parsing template files: %v", err)
+		return WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	err = tmpl.ExecuteTemplate(
+		w,
+		"content",
+		ConvertedFile{Filename: convertedFileName, FileType: convertedFileType},
+	)
+	if err != nil {
+		log.Printf("error occurred executing template files: %v", err)
 		return WithHTTPStatus(err, http.StatusInternalServerError)
 	}
 
@@ -295,7 +407,9 @@ func addRoutes(r *chi.Mux, fs, fsUpload http.Handler) {
 	r.Handle("/static/*", fs)
 	r.Handle("/files/*", http.StripPrefix("/files", fsUpload))
 	r.Get("/", toHandler(index))
+	r.Get("/open", toHandler(openLzcFile))
 	r.Post("/upload", toHandler(handleUploadFile))
+	r.Post("/uploadLzc", toHandler(handleUploadLzcFile))
 	r.Post("/format", toHandler(handleFileFormat))
 	r.Get("/modal", toHandler(handleModal))
 
@@ -460,6 +574,91 @@ func convertFile(r *http.Request) (string, string, []byte, error) {
 	}
 
 	convertedFileName = filename(fileHeader.Filename, targetFileSubType)
+	convertedFilePath = filepath.Join(uploadPath, convertedFileName)
+
+	newFile, err := os.Create(convertedFilePath)
+	if err != nil {
+		log.Printf("error occurred while creating the output file: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+	defer newFile.Close()
+
+	buf := new(bytes.Buffer)
+	if _, err := buf.ReadFrom(convertedFile); err != nil {
+		log.Printf("error occurred while readinf from the converted file: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	convertedFileBytes := buf.Bytes()
+	if _, err := newFile.Write(convertedFileBytes); err != nil {
+		log.Printf("error occurred writing converted output to a file in disk: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	convertedFileMimeType := mimetype.Detect(convertedFileBytes)
+
+	convertedFileType, _, err := files.TypeAndSupType(convertedFileMimeType.String())
+	if err != nil {
+		log.Printf("error occurred getting the file type of the result file: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	return convertedFileName, convertedFileType, convertedFileBytes, nil
+}
+
+func convertFileLzc(file []byte, targetFileSubType string, originFileName string) (string, string, []byte, error) {
+	var (
+		convertedFile     io.Reader
+		convertedFilePath string
+		convertedFileName string
+		err               error
+	)
+
+	// Call Detect fuction to get the mimetype of the input file.
+	detectedFileType := mimetype.Detect(file)
+
+	// Parse the mimetype to get the type and the sub-type of the input file.
+	fileType, subType, err := files.TypeAndSupType(detectedFileType.String())
+	if err != nil {
+		log.Printf("error occurred getting type and subtype from mimetype: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusBadRequest)
+	}
+
+	// Get the right factory based off the input file type.
+	fileFactory, err := files.BuildFactory(fileType, originFileName)
+	if err != nil {
+		log.Printf("error occurred while getting a file factory: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusBadRequest)
+	}
+
+	// Returns an object that implements the File interface based on the sub-type of the input file.
+	f, err := fileFactory.NewFile(subType)
+	if err != nil {
+		log.Printf("error occurred getting the file object: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusBadRequest)
+	}
+
+	// Return the kind of the output file.
+	targetFileType := files.SupportedFileTypes()[targetFileSubType]
+
+	// Convert the file to the target format.
+	// convertedFile is an io.Reader.
+	convertedFile, err = f.ConvertTo(
+		cases.Title(language.English).String(targetFileType),
+		targetFileSubType,
+		bytes.NewReader(file),
+	)
+	if err != nil {
+		log.Printf("error ocurred while processing the input file: %v", err)
+		return "", "", nil, WithHTTPStatus(err, http.StatusInternalServerError)
+	}
+
+	switch fileType {
+	case "application", "text":
+		targetFileSubType = "zip"
+	}
+
+	convertedFileName = filename(originFileName, targetFileSubType)
 	convertedFilePath = filepath.Join(uploadPath, convertedFileName)
 
 	newFile, err := os.Create(convertedFilePath)

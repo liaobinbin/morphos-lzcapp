@@ -1,0 +1,52 @@
+{{define "title"}}Upload your file{{end}}
+
+{{define "content"}}
+<div class="row align-items-center" style="height: 50vh;">
+  <div class="mx-auto col-10" hx-ext="response-targets">
+    <form id="form"
+          hx-encoding="multipart/form-data"
+          hx-post="/uploadLzc"
+          hx-swap="outerHTML"
+          hx-indicator="#spinner"
+          hx-target-error="#any-errors">
+      <h2>File Converter</h2>
+      <div class="row g-3">
+        <div class="col-sm-7">
+
+          <label for="formFile" class="form-label">Choosed file</label>
+          <input class="form-control"
+                 disabled
+                 value="{{ .fileData.filename }}"
+                 name="showName"/>
+        </div>
+
+        <input value="{{ .fileData.filename }}" name="fileName" hidden="true" />
+        <input name="filePath" value="{{ .fileData.filepath }}" hidden="true"/>
+
+        <div class="col-sm">
+          <label for="input-format" class="form-label">Formats to convert</label>
+          <select id="input-format" class="form-select" name="targetFormat">
+            {{ block "format-elements" .targetList }}
+              {{ range $family, $formats := . }}
+                <optgroup label="{{ $family }}">
+                {{ range $element := $formats }}
+                  <option value="{{ $element }}">{{ $element }}</option>
+                {{ end }}
+                </optgroup>
+              {{ end }}
+            {{ end}}
+          </select>
+        </div>
+        <div class="col-sm-12">
+          <button class="btn btn-primary">
+          <span class="spinner-border spinner-border-sm htmx-indicator" id="spinner" role="status" aria-hidden="true"></span>
+            Convert
+          </button>
+          <progress id='progress' class='htmx-indicator' value='0' max='100'></progress>
+        </div>
+        <div id="any-errors"></div>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
